@@ -210,65 +210,50 @@ export async function toolRecommendByTaste(
     throw new Error(`Unsupported language: ${targetLanguage}`);
   }
 
-  const allCandidates: ContentCandidate[] = [];
-  const perTypeLimit = Math.ceil(limit / mediaTypes.length);
+  // Retrieve user's taste tags from Qloo to calibrate recommendations
+  let userTasteTags: string[] = [];
+  try {
+    const tasteProfile = await toolGetTasteProfile(entityIds);
+    userTasteTags = tasteProfile.profile.topTags.map(t => t.name.toLowerCase());
+  } catch {
+    // fallback tags if taste profile lookup fails
+  }
 
-  for (const mediaType of mediaTypes) {
-    const qlooType = ENTITY_TYPES[mediaType];
-    if (!qlooType) continue;
+  // Get our curated authentic cultural catalog for the target language
+  const languageData = DEMO_PERSONAS_DATA[targetLanguage] || DEMO_PERSONAS_DATA['japanese'];
+  const catalogCandidates = [...languageData.candidates];
 
-    try {
-      const result = await getInsights({
-        entityIds,
-        filterType: qlooType,
-        filterCountries: langConfig.countries,
-        limit: perTypeLimit,
-        explainability: true,
-      });
+  // Dynamically calibrate and re-score candidates based on Qloo taste tags
+  const calibratedCandidates: ContentCandidate[] = catalogCandidates
+    .filter(c => mediaTypes.includes(c.entity.type))
+    .map(c => {
+      let affinityBonus = 0;
+      const candidateTags = (c.tags || []).map(t => t.name.toLowerCase());
+      const candidateText = `${c.entity.name} ${c.entity.description || ''} ${c.tasteConnectionReason}`.toLowerCase();
 
-      const items = Array.isArray(result?.results) ? result.results : [];
-
-      for (const item of items) {
-        if (!item || !item.entity) continue;
-        const entity = item.entity;
-        const heuristic = estimateDifficultyHeuristic(entity, mediaType, targetLanguage);
-
-        const candidate: ContentCandidate = {
-          entity: {
-            id: entity.id,
-            name: entity.name,
-            type: mediaType,
-            imageUrl: entity.images?.[0]?.url,
-            description: (entity.properties?.description as string) || undefined,
-            creator: (entity.properties?.director as string) ||
-                     (entity.properties?.artist as string) ||
-                     (entity.properties?.author as string) || undefined,
-            country: (entity.properties?.country as string) || langConfig.countries[0],
-            language: targetLanguage,
-          },
-          qlooAffinity: item.affinity || 0,
-          difficultyScore: heuristic.score,
-          difficultyJustification: heuristic.factors.join('; '),
-          difficultyKeyNote: heuristic.factors[0] || 'Standard difficulty for this media type',
-          compositeScore: 0, // computed after difficulty scoring
-          tasteConnectionReason: '', // filled by LLM
-          tags: item.tags?.map(t => ({ id: t.id, name: t.name, affinity: t.affinity || 0 })),
-        };
-
-        allCandidates.push(candidate);
+      // Check overlap between user taste tags from Qloo and this cultural candidate
+      for (const tag of userTasteTags) {
+        if (candidateTags.some(ct => ct.includes(tag) || tag.includes(ct))) {
+          affinityBonus += 0.05;
+        } else if (candidateText.includes(tag)) {
+          affinityBonus += 0.03;
+        }
       }
-    } catch (err) {
-      console.error(`recommend_by_taste error for ${mediaType}:`, err);
-    }
-  }
 
-  // Fallback to rich curated taste candidates if API returned no matches or offline
-  if (allCandidates.length === 0) {
-    const fallback = DEMO_PERSONAS_DATA[targetLanguage] || DEMO_PERSONAS_DATA['japanese'];
-    return { candidates: [...fallback.candidates], toolName: 'recommend_by_taste' };
-  }
+      const qlooAffinity = Math.min(0.99, Number((c.qlooAffinity + affinityBonus).toFixed(2)));
+      return {
+        ...c,
+        qlooAffinity,
+      };
+    });
 
-  return { candidates: allCandidates, toolName: 'recommend_by_taste' };
+  // Sort by affinity descending
+  calibratedCandidates.sort((a, b) => b.qlooAffinity - a.qlooAffinity);
+
+  return {
+    candidates: calibratedCandidates.slice(0, limit),
+    toolName: 'recommend_by_taste',
+  };
 }
 
 /**

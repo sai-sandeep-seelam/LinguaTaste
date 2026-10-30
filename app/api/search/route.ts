@@ -2,7 +2,6 @@ import { NextRequest, NextResponse } from 'next/server';
 import { searchEntities } from '@/lib/qloo';
 import { ENTITY_TYPES } from '@/lib/qloo';
 
-export const dynamic = 'force-dynamic';
 
 export async function GET(req: NextRequest) {
   try {
